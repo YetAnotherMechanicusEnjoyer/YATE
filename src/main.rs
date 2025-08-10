@@ -1,10 +1,12 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use eframe::egui::{
     self, Color32, FontFamily, FontId,
     text::{LayoutJob, TextFormat},
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use serde::{Deserialize, Serialize};
 use std::{
+    fs,
     io::{Read, Write},
     mem,
     sync::{Arc, Mutex},
@@ -12,7 +14,167 @@ use std::{
     time::Duration,
 };
 
+#[derive(Debug, Serialize, Deserialize)]
+struct ColorPalette {
+    background: [u8; 4],
+    white: [u8; 4],
+    black: [u8; 4],
+    red: [u8; 4],
+    green: [u8; 4],
+    yellow: [u8; 4],
+    blue: [u8; 4],
+    magenta: [u8; 4],
+    cyan: [u8; 4],
+    grey: [u8; 4],
+    bright_red: [u8; 4],
+    bright_green: [u8; 4],
+    bright_yellow: [u8; 4],
+    bright_blue: [u8; 4],
+    bright_magenta: [u8; 4],
+    bright_cyan: [u8; 4],
+}
+
+impl From<&Colors> for ColorPalette {
+    fn from(colors: &Colors) -> Self {
+        Self {
+            background: colors.background.to_array(),
+            white: colors.white.to_array(),
+            black: colors.black.to_array(),
+            red: colors.red.to_array(),
+            green: colors.green.to_array(),
+            yellow: colors.yellow.to_array(),
+            blue: colors.blue.to_array(),
+            magenta: colors.magenta.to_array(),
+            cyan: colors.cyan.to_array(),
+            grey: colors.grey.to_array(),
+            bright_red: colors.bright_red.to_array(),
+            bright_green: colors.bright_green.to_array(),
+            bright_yellow: colors.bright_yellow.to_array(),
+            bright_blue: colors.bright_blue.to_array(),
+            bright_magenta: colors.bright_magenta.to_array(),
+            bright_cyan: colors.bright_cyan.to_array(),
+        }
+    }
+}
+
+impl From<ColorPalette> for Colors {
+    fn from(palette: ColorPalette) -> Self {
+        Self {
+            background: Color32::from_rgba_unmultiplied(
+                palette.background[0],
+                palette.background[1],
+                palette.background[2],
+                palette.background[3],
+            ),
+            white: Color32::from_rgba_unmultiplied(
+                palette.white[0],
+                palette.white[1],
+                palette.white[2],
+                palette.white[3],
+            ),
+            black: Color32::from_rgba_unmultiplied(
+                palette.black[0],
+                palette.black[1],
+                palette.black[2],
+                palette.black[3],
+            ),
+            red: Color32::from_rgba_unmultiplied(
+                palette.red[0],
+                palette.red[1],
+                palette.red[2],
+                palette.red[3],
+            ),
+            green: Color32::from_rgba_unmultiplied(
+                palette.green[0],
+                palette.green[1],
+                palette.green[2],
+                palette.green[3],
+            ),
+            yellow: Color32::from_rgba_unmultiplied(
+                palette.yellow[0],
+                palette.yellow[1],
+                palette.yellow[2],
+                palette.yellow[3],
+            ),
+            blue: Color32::from_rgba_unmultiplied(
+                palette.blue[0],
+                palette.blue[1],
+                palette.blue[2],
+                palette.blue[3],
+            ),
+            magenta: Color32::from_rgba_unmultiplied(
+                palette.magenta[0],
+                palette.magenta[1],
+                palette.magenta[2],
+                palette.magenta[3],
+            ),
+            cyan: Color32::from_rgba_unmultiplied(
+                palette.cyan[0],
+                palette.cyan[1],
+                palette.cyan[2],
+                palette.cyan[3],
+            ),
+            grey: Color32::from_rgba_unmultiplied(
+                palette.grey[0],
+                palette.grey[1],
+                palette.grey[2],
+                palette.grey[3],
+            ),
+            bright_red: Color32::from_rgba_unmultiplied(
+                palette.bright_red[0],
+                palette.bright_red[1],
+                palette.bright_red[2],
+                palette.bright_red[3],
+            ),
+            bright_green: Color32::from_rgba_unmultiplied(
+                palette.bright_green[0],
+                palette.bright_green[1],
+                palette.bright_green[2],
+                palette.bright_green[3],
+            ),
+            bright_yellow: Color32::from_rgba_unmultiplied(
+                palette.bright_yellow[0],
+                palette.bright_yellow[1],
+                palette.bright_yellow[2],
+                palette.bright_yellow[3],
+            ),
+            bright_blue: Color32::from_rgba_unmultiplied(
+                palette.bright_blue[0],
+                palette.bright_blue[1],
+                palette.bright_blue[2],
+                palette.bright_blue[3],
+            ),
+            bright_magenta: Color32::from_rgba_unmultiplied(
+                palette.bright_magenta[0],
+                palette.bright_magenta[1],
+                palette.bright_magenta[2],
+                palette.bright_magenta[3],
+            ),
+            bright_cyan: Color32::from_rgba_unmultiplied(
+                palette.bright_cyan[0],
+                palette.bright_cyan[1],
+                palette.bright_cyan[2],
+                palette.bright_cyan[3],
+            ),
+        }
+    }
+}
+
+fn load_colors(path: &str) -> Result<ColorPalette> {
+    let toml_string = fs::read_to_string(path).context("Failed to read colors.toml file")?;
+    let palette = toml::from_str(&toml_string).context("Failed to parse colors.toml")?;
+    Ok(palette)
+}
+
+fn save_colors(path: &str, colors: &ColorPalette) -> Result<()> {
+    let toml_string =
+        toml::to_string_pretty(colors).context("Failed to serialize colors to TOML")?;
+    fs::write(path, toml_string).context("Failed to write to colors.toml")?;
+    Ok(())
+}
+
 struct Colors {
+    background: Color32,
     white: Color32,
     black: Color32,
     red: Color32,
@@ -90,7 +252,6 @@ impl TerminalApp {
                                         if let Ok(num) = part.parse::<u32>() {
                                             match num {
                                                 0 => {
-                                                    // Reset all attributes.
                                                     self.current_format.color = self.colors.white;
                                                     self.current_format.underline =
                                                         egui::Stroke::NONE;
@@ -168,7 +329,8 @@ impl TerminalApp {
 
 impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let frame = egui::Frame::central_panel(&ctx.style()).fill(self.colors.background);
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let new_output = {
                 let mut output_buffer = self.output_buffer.lock().unwrap();
                 mem::take(&mut *output_buffer)
@@ -270,6 +432,33 @@ fn main() -> Result<()> {
         "YATE",
         options,
         Box::new(|_cc| {
+            let colors = match load_colors("colors.toml") {
+                Ok(palette) => Colors::from(palette),
+                Err(e) => {
+                    eprintln!("Failed to load colors.toml: {e}. Using default colors.");
+                    let default_colors = Colors {
+                        background: Color32::from_rgb(20, 20, 20),
+                        white: Color32::WHITE,
+                        black: Color32::BLACK,
+                        red: Color32::RED,
+                        green: Color32::GREEN,
+                        yellow: Color32::YELLOW,
+                        blue: Color32::BLUE,
+                        magenta: Color32::MAGENTA,
+                        cyan: Color32::CYAN,
+                        grey: Color32::GRAY,
+                        bright_red: Color32::LIGHT_RED,
+                        bright_green: Color32::LIGHT_GREEN,
+                        bright_yellow: Color32::LIGHT_YELLOW,
+                        bright_blue: Color32::LIGHT_BLUE,
+                        bright_magenta: Color32::PURPLE,
+                        bright_cyan: Color32::DARK_BLUE,
+                    };
+                    let _ = save_colors("colors.toml", &ColorPalette::from(&default_colors));
+                    default_colors
+                }
+            };
+
             Ok(Box::new(TerminalApp {
                 output_buffer,
                 writer: app_writer,
@@ -283,23 +472,7 @@ fn main() -> Result<()> {
                     ..Default::default()
                 },
                 partial_char_buffer: Vec::new(),
-                colors: Colors {
-                    white: Color32::WHITE,
-                    black: Color32::BLACK,
-                    red: Color32::RED,
-                    green: Color32::GREEN,
-                    yellow: Color32::YELLOW,
-                    blue: Color32::BLUE,
-                    magenta: Color32::MAGENTA,
-                    cyan: Color32::CYAN,
-                    grey: Color32::GRAY,
-                    bright_red: Color32::LIGHT_RED,
-                    bright_green: Color32::LIGHT_GREEN,
-                    bright_yellow: Color32::LIGHT_YELLOW,
-                    bright_blue: Color32::LIGHT_BLUE,
-                    bright_magenta: Color32::PURPLE,
-                    bright_cyan: Color32::DARK_BLUE,
-                },
+                colors,
             }))
         }),
     )
