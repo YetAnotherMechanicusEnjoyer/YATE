@@ -425,7 +425,9 @@ fn main() -> Result<()> {
     });
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size(egui::vec2(640.0, 375.0)),
+        viewport: egui::ViewportBuilder::default()
+            .with_resizable(true)
+            .with_inner_size(egui::vec2(1920.0, 1080.0)),
         ..Default::default()
     };
     eframe::run_native(
@@ -468,7 +470,7 @@ fn main() -> Result<()> {
                 stick_to_bottom: true,
                 current_format: TextFormat {
                     font_id: FontId::new(14.0, FontFamily::Monospace),
-                    color: Color32::WHITE,
+                    color: colors.white,
                     ..Default::default()
                 },
                 partial_char_buffer: Vec::new(),
