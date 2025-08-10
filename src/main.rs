@@ -1,91 +1,213 @@
 use anyhow::Result;
-use eframe::egui;
+use eframe::egui::{
+    self, Color32, FontFamily, FontId,
+    text::{LayoutJob, TextFormat},
+};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
     io::{Read, Write},
+    mem,
     sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
 
+struct Colors {
+    white: Color32,
+    black: Color32,
+    red: Color32,
+    green: Color32,
+    yellow: Color32,
+    blue: Color32,
+    magenta: Color32,
+    cyan: Color32,
+    grey: Color32,
+    bright_red: Color32,
+    bright_green: Color32,
+    bright_yellow: Color32,
+    bright_blue: Color32,
+    bright_magenta: Color32,
+    bright_cyan: Color32,
+}
+
 struct TerminalApp {
     output_buffer: Arc<Mutex<Vec<u8>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    master_pty: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    _master_pty: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    layout_job: LayoutJob,
+    input_text: String,
+    stick_to_bottom: bool,
+    current_format: TextFormat,
+    partial_char_buffer: Vec<u8>,
+    colors: Colors,
+}
+
+impl TerminalApp {
+    fn append_new_output(&mut self, new_output: &[u8]) {
+        let mut text_to_append = Vec::new();
+
+        for &byte in new_output {
+            match byte {
+                b'\x1b' => {
+                    if !text_to_append.is_empty() {
+                        self.layout_job.append(
+                            &String::from_utf8_lossy(&text_to_append),
+                            0.0,
+                            self.current_format.clone(),
+                        );
+                        text_to_append.clear();
+                    }
+                    self.partial_char_buffer.push(byte);
+                }
+                b'[' if self.partial_char_buffer.last() == Some(&b'\x1b') => {
+                    self.partial_char_buffer.push(byte);
+                }
+                b'\n' | b'\r' => {
+                    if !text_to_append.is_empty() {
+                        self.layout_job.append(
+                            &String::from_utf8_lossy(&text_to_append),
+                            0.0,
+                            self.current_format.clone(),
+                        );
+                        text_to_append.clear();
+                    }
+                    self.layout_job.append(
+                        &String::from_utf8_lossy(&[byte]),
+                        0.0,
+                        self.current_format.clone(),
+                    );
+                }
+                _ if !self.partial_char_buffer.is_empty() => {
+                    self.partial_char_buffer.push(byte);
+                    if let Some(command_char) = self.partial_char_buffer.last() {
+                        if command_char.is_ascii_alphabetic() {
+                            let ansi_sequence = String::from_utf8_lossy(&self.partial_char_buffer);
+                            if ansi_sequence.ends_with('m') {
+                                if let Some(start_index) = ansi_sequence.find('[') {
+                                    let code_str =
+                                        &ansi_sequence[start_index + 1..ansi_sequence.len() - 1];
+                                    for part in code_str.split(';') {
+                                        if let Ok(num) = part.parse::<u32>() {
+                                            match num {
+                                                0 => {
+                                                    // Reset all attributes.
+                                                    self.current_format.color = self.colors.white;
+                                                    self.current_format.underline =
+                                                        egui::Stroke::NONE;
+                                                }
+                                                30 => self.current_format.color = self.colors.black,
+                                                31 => self.current_format.color = self.colors.red,
+                                                32 => self.current_format.color = self.colors.green,
+                                                33 => {
+                                                    self.current_format.color = self.colors.yellow
+                                                }
+                                                34 => self.current_format.color = self.colors.blue,
+                                                35 => {
+                                                    self.current_format.color = self.colors.magenta
+                                                }
+                                                36 => self.current_format.color = self.colors.cyan,
+                                                37 => self.current_format.color = self.colors.white,
+                                                90 => self.current_format.color = self.colors.grey,
+                                                91 => {
+                                                    self.current_format.color =
+                                                        self.colors.bright_red
+                                                }
+                                                92 => {
+                                                    self.current_format.color =
+                                                        self.colors.bright_green
+                                                }
+                                                93 => {
+                                                    self.current_format.color =
+                                                        self.colors.bright_yellow
+                                                }
+                                                94 => {
+                                                    self.current_format.color =
+                                                        self.colors.bright_blue
+                                                }
+                                                95 => {
+                                                    self.current_format.color =
+                                                        self.colors.bright_magenta
+                                                }
+                                                96 => {
+                                                    self.current_format.color =
+                                                        self.colors.bright_cyan
+                                                }
+                                                97 => self.current_format.color = self.colors.white,
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            self.partial_char_buffer.clear();
+                        }
+                    }
+                }
+                _ => {
+                    if !self.partial_char_buffer.is_empty() {
+                        self.layout_job.append(
+                            &String::from_utf8_lossy(&self.partial_char_buffer),
+                            0.0,
+                            self.current_format.clone(),
+                        );
+                        self.partial_char_buffer.clear();
+                    }
+                    text_to_append.push(byte);
+                }
+            }
+        }
+        if !text_to_append.is_empty() {
+            self.layout_job.append(
+                &String::from_utf8_lossy(&text_to_append),
+                0.0,
+                self.current_format.clone(),
+            );
+        }
+    }
 }
 
 impl eframe::App for TerminalApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            let output_buffer = self.output_buffer.lock().unwrap();
-            let text = String::from_utf8_lossy(&output_buffer).to_string();
+            let new_output = {
+                let mut output_buffer = self.output_buffer.lock().unwrap();
+                mem::take(&mut *output_buffer)
+            };
+            if !new_output.is_empty() {
+                self.append_new_output(&new_output);
+            }
+            let scroll_area_response = egui::ScrollArea::vertical()
+                .stick_to_bottom(self.stick_to_bottom)
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(self.layout_job.clone()));
+                });
 
-            egui::TextEdit::multiline(&mut text.clone())
-                .desired_width(ui.available_width())
-                .desired_rows(25)
-                .font(egui::TextStyle::Monospace)
-                .show(ui);
-
-            for event in ctx.input(|i| i.events.clone()).iter() {
-                match event {
-                    egui::Event::Text(input_text) => {
-                        if !input_text.is_empty() {
-                            let mut writer = self.writer.lock().unwrap();
-                            let _ = writer.write_all(input_text.as_bytes());
-                            let _ = writer.flush();
-                        }
-                    }
-                    egui::Event::Key {
-                        key, pressed: true, ..
-                    } => {
-                        let mut writer = self.writer.lock().unwrap();
-                        let bytes_to_send: Option<&'static [u8]> = match key {
-                            egui::Key::Enter => Some(b"\n"),
-                            egui::Key::Backspace => Some(b"\x7f"),
-                            egui::Key::ArrowLeft => Some(b"\x1b[D"),
-                            egui::Key::ArrowRight => Some(b"\x1b[C"),
-                            egui::Key::ArrowUp => Some(b"\x1b[A"),
-                            egui::Key::ArrowDown => Some(b"\x1b[B"),
-                            egui::Key::Tab => Some(b"\t"),
-                            egui::Key::Escape => Some(b"\x1b"),
-                            _ => None,
-                        };
-
-                        if let Some(bytes) = bytes_to_send {
-                            let _ = writer.write_all(bytes);
-                            let _ = writer.flush();
-                        }
-                    }
-                    _ => {}
-                }
+            let max_offset_y =
+                scroll_area_response.content_size.y - scroll_area_response.inner_rect.height();
+            if scroll_area_response.state.offset.y < max_offset_y - 1.0 {
+                self.stick_to_bottom = false;
             }
 
-            ctx.request_repaint();
+            let text_edit_response = ui.add(
+                egui::TextEdit::singleline(&mut self.input_text)
+                    .desired_width(ui.available_width())
+                    .hint_text("Type commands here...")
+                    .font(egui::TextStyle::Monospace)
+                    .margin(egui::Margin::symmetric(5, 5)),
+            );
+
+            if text_edit_response.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let mut writer = self.writer.lock().unwrap();
+                let _ = writer.write_all(self.input_text.as_bytes());
+                let _ = writer.write_all(b"\n");
+                let _ = writer.flush();
+                self.input_text.clear();
+                self.stick_to_bottom = true;
+                text_edit_response.request_focus();
+            }
+
+            ctx.request_repaint_after(Duration::from_millis(1));
         });
-
-        let new_size = ctx.input(|i| i.screen_rect).size();
-        let current_pty_size = self
-            .master_pty
-            .lock()
-            .unwrap()
-            .get_size()
-            .unwrap_or(PtySize {
-                rows: 0,
-                cols: 0,
-                pixel_width: 0,
-                pixel_height: 0,
-            });
-
-        if (new_size.x as u16) != current_pty_size.pixel_width
-            || (new_size.y as u16) != current_pty_size.pixel_height
-        {
-            let _ = self.master_pty.lock().unwrap().resize(PtySize {
-                rows: (new_size.y / 15.0).max(1.0) as u16,
-                cols: (new_size.x / 8.0).max(1.0) as u16,
-                pixel_width: new_size.x as u16,
-                pixel_height: new_size.y as u16,
-            });
-        }
     }
 }
 
@@ -151,7 +273,33 @@ fn main() -> Result<()> {
             Ok(Box::new(TerminalApp {
                 output_buffer,
                 writer: app_writer,
-                master_pty: app_master_pty,
+                _master_pty: app_master_pty,
+                layout_job: LayoutJob::default(),
+                input_text: String::new(),
+                stick_to_bottom: true,
+                current_format: TextFormat {
+                    font_id: FontId::new(14.0, FontFamily::Monospace),
+                    color: Color32::WHITE,
+                    ..Default::default()
+                },
+                partial_char_buffer: Vec::new(),
+                colors: Colors {
+                    white: Color32::WHITE,
+                    black: Color32::BLACK,
+                    red: Color32::RED,
+                    green: Color32::GREEN,
+                    yellow: Color32::YELLOW,
+                    blue: Color32::BLUE,
+                    magenta: Color32::MAGENTA,
+                    cyan: Color32::CYAN,
+                    grey: Color32::GRAY,
+                    bright_red: Color32::LIGHT_RED,
+                    bright_green: Color32::LIGHT_GREEN,
+                    bright_yellow: Color32::LIGHT_YELLOW,
+                    bright_blue: Color32::LIGHT_BLUE,
+                    bright_magenta: Color32::PURPLE,
+                    bright_cyan: Color32::DARK_BLUE,
+                },
             }))
         }),
     )
